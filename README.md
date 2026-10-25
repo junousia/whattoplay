@@ -51,7 +51,7 @@ whattoplay mark --name "Portal 2" finished --note "great"
 whattoplay mark epic:Hibiscus dismissed
 whattoplay queue                                  # playing + queued
 whattoplay library --unmarked --platform steam
-whattoplay deals price --title "Hades" --country FI --shop steam   # needs ITAD_API_KEY
+whattoplay deals price --title "Hades" --country FI --shop steam   # needs ITAD_API_KEY; add --on-sale for discounted offers only
 whattoplay deals bundles --limit 10               # flags games you don't own yet
 ```
 

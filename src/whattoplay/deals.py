@@ -33,17 +33,24 @@ def lookup(api_key: str, title: str | None = None, appid: int | None = None) -> 
 
 
 def price(
-    api_key: str, title: str | None, appid: int | None, country: str, shop: str | None = None
+    api_key: str,
+    title: str | None,
+    appid: int | None,
+    country: str,
+    shop: str | None = None,
+    on_sale: bool = False,
 ) -> dict | None:
+    """Current prices per shop (`cut` is 0 when not discounted) and the all-time low.
+
+    `on_sale` asks IsThereAnyDeal for discounted offers only; for a game with no sale right now
+    its answer is empty, which is why it is opt-in."""
     game = lookup(api_key, title=title, appid=appid)
     if game is None:
         return None
-    data = _request(
-        "POST",
-        "/games/prices/v3",
-        params={"key": api_key, "country": country, "deals": "true"},
-        json=[game["id"]],
-    )
+    params = {"key": api_key, "country": country}
+    if on_sale:
+        params["deals"] = "true"
+    data = _request("POST", "/games/prices/v3", params=params, json=[game["id"]])
     entry = data[0] if data else {}
     deals = entry.get("deals", [])
     if shop:

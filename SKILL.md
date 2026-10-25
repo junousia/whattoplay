@@ -28,7 +28,7 @@ Data lives in `$WHATTOPLAY_DIR` (default `~/.local/share/whattoplay`): library c
 | `stats` | Unique games, counts by status and platform, and when the library was last refreshed (`age_days`) |
 | `refresh [--store S]` | Re-fetch libraries. Slow for Steam (rate-limited metadata) and it hits external services: only when asked, or when `suggest` reports `empty` |
 | `stores`, `configure <store> [--enable\|--disable]` | Backends and their setup |
-| `deals price --title T [--appid N] [--country FI] [--shop steam]` | Current prices and all-time low (IsThereAnyDeal, needs `ITAD_API_KEY`) |
+| `deals price --title T [--appid N] [--country FI] [--shop steam] [--on-sale]` | Current price per shop (`cut` 0 = not discounted) and all-time low (IsThereAnyDeal, needs `ITAD_API_KEY`) |
 | `deals bundles [--limit N] [--country FI]` | Active bundles, with the games the user does not own already |
 
 The same game owned on several stores (or PS4/PS5 editions) is one game: a `mark` applies to every copy, `also_on` lists the other copies' keys, and missing genres or scores are filled in from the copy that has them. If `stats` shows `age_days` of a few weeks, offer a `refresh`.

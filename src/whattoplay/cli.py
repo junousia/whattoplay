@@ -488,7 +488,7 @@ def cmd_deals(ctx: Context, args) -> None:
             return
         if not args.title and not args.appid:
             raise CliError("deals price needs --title or --appid")
-        found = deals.price(api_key, args.title, args.appid, args.country, args.shop)
+        found = deals.price(api_key, args.title, args.appid, args.country, args.shop, args.on_sale)
     except deals.DealsError as exc:
         raise CliError(str(exc)) from exc
     if found is None:
@@ -598,6 +598,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--appid", type=int, help="Steam appid")
     p.add_argument("--country", default="US")
     p.add_argument("--shop", help="only deals from shops whose name contains this")
+    p.add_argument("--on-sale", action="store_true", help="price: only currently discounted offers")
     p.add_argument("--limit", type=int, default=20)
     return parser
 

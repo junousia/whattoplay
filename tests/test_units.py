@@ -173,3 +173,26 @@ def test_epic_metadata_comes_from_exact_steam_name_match():
         EpicStore({}, {}).enrich(games, cache, lambda _msg: None)
     assert games[0].genres == ["Action"] and games[0].metacritic_score == 93
     assert games[1].genres == [] and cache["e2"] == {}  # miss is cached so it is not re-queried
+
+
+def test_price_lists_all_current_prices_unless_on_sale_requested():
+    entry = [
+        {
+            "id": "g1",
+            "historyLow": {"all": {"amount": 6.1, "currency": "EUR"}},
+            "deals": [
+                {"shop": {"name": "Steam"}, "price": {"amount": 20, "currency": "EUR"}, "cut": 0}
+            ],
+        }
+    ]
+    with requests_mock.Mocker() as m:
+        m.get(
+            "https://api.isthereanydeal.com/games/lookup/v1",
+            json={"found": True, "game": {"id": "g1", "title": "Hades"}},
+        )
+        prices = m.post("https://api.isthereanydeal.com/games/prices/v3", json=entry)
+        full = deals.price("k", "Hades", None, "FI")
+        assert "deals" not in prices.last_request.qs  # `deals=true` would hide undiscounted offers
+        deals.price("k", "Hades", None, "FI", on_sale=True)
+        assert prices.last_request.qs["deals"] == ["true"]
+    assert full["deals"][0]["cut"] == 0 and full["historyLow"]["all"]["amount"] == 6.1
