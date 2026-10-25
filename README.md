@@ -71,7 +71,7 @@ Two ways to ship one:
 
 A plugin that fails to import is reported by `whattoplay stores` and never stops the others. Plugins run with your user's permissions, so only install ones you trust.
 
-A PlayStation backend, for example, would implement `fetch_library()` on top of an existing client library such as [`psnawp`](https://github.com/isFakeAccount/psnawp), read its token from a `PSN_NPSSO` environment variable (declared as a secret `Setting`), and map trophy/play-time data to `Game`. No PSN plugin is included.
+A PlayStation backend, for example, would implement `fetch_library()` on top of an existing client library such as [`psnawp`](https://github.com/isFakeAccount/psnawp), read its token from a `PSN_NPSSO` environment variable (declared as a secret `Setting`), and map trophy/play-time data to `Game`. A ready-made PlayStation plugin lives in [whattoplay-psn](https://github.com/junousia/whattoplay-psn) (`uv tool install whattoplay --with whattoplay-psn`).
 
 ## Using it as an agent skill
 
