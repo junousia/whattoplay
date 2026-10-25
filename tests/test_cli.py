@@ -183,3 +183,91 @@ def test_refresh_shares_metadata_and_records_time(run, data_dir):
     assert games[1].genres == ["RPG"] and games[1].metacritic_score == 80
     run("refresh")
     assert run("stats")[1]["refreshed_at"]
+
+
+def _times_setup(monkeypatch, data_dir, table):
+    """Fake HowLongToBeat: `table` maps a game name to its main-story hours (missing = no match)."""
+    from whattoplay import hltb
+
+    calls = []
+
+    def fake_lookup(name):
+        calls.append(name)
+        hours = table.get(name)
+        if hours is None:
+            return {}
+        return {
+            "main_hours": hours,
+            "extra_hours": hours + 2,
+            "completionist_hours": hours + 5,
+            "hltb_url": f"https://hltb.test/{name}",
+        }
+
+    monkeypatch.setattr(hltb, "lookup", fake_lookup)
+    monkeypatch.setattr(hltb, "LOOKUP_DELAY_SECONDS", 0)
+    return calls
+
+
+def test_max_hours_looks_up_and_filters(run, data_dir, monkeypatch):
+    _two_store_library(data_dir)
+    calls = _times_setup(monkeypatch, data_dir, {"Hades": 22.0, "Gloomhaven": 4.0})
+    code, picks = run("suggest", "--max-hours", "10")
+    assert code == 0 and [g["name"] for g in picks] == ["Gloomhaven"]
+    assert picks[0]["main_hours"] == 4.0 and picks[0]["hltb_url"].endswith("Gloomhaven")
+    n = len(calls)
+    run("suggest", "--max-hours", "30")
+    assert len(calls) == n  # cached: nothing is asked twice
+
+
+def test_unknown_time_is_dropped_unless_requested(run, data_dir, monkeypatch):
+    _two_store_library(data_dir)
+    _times_setup(monkeypatch, data_dir, {"Hades": 22.0})  # Gloomhaven: no match
+    _, picks = run("suggest", "--max-hours", "30")
+    assert [g["name"] for g in picks] == ["Hades"]
+    _, picks = run("suggest", "--max-hours", "30", "--include-unknown-time")
+    assert sorted(g["name"] for g in picks) == ["Gloomhaven", "Hades"]
+
+
+def test_lookup_budget_limits_requests(run, data_dir, monkeypatch):
+    _two_store_library(data_dir)
+    calls = _times_setup(monkeypatch, data_dir, {"Hades": 3.0, "Gloomhaven": 3.0})
+    _, picks = run("suggest", "--max-hours", "10", "--lookup", "1")
+    assert len(calls) == 1 and len(picks) == 1
+
+
+def test_times_command_for_one_game_and_stats(run, data_dir, monkeypatch):
+    _two_store_library(data_dir)
+    _times_setup(monkeypatch, data_dir, {"Hades": 22.0})
+    code, out = run("times", "hades")
+    assert code == 0 and out["game"]["main_hours"] == 22.0
+    _, found = run("find", "hades")
+    assert found[0]["main_hours"] == 22.0  # shown everywhere once cached
+    assert run("stats")[1]["times_known"] == 1
+
+
+def test_pick_prefers_exact_title_over_similar():
+    from types import SimpleNamespace as R
+
+    from whattoplay import hltb
+
+    results = [
+        R(game_name="Portal 2: Peer Review", similarity=0.95),
+        R(game_name="Portal 2", similarity=0.9),
+    ]
+    assert hltb.pick(results, "portal 2").game_name == "Portal 2"
+    assert hltb.pick([R(game_name="Something Else", similarity=0.3)], "Portal") is None
+
+
+def test_missing_hltb_package_gives_actionable_error(run, data_dir, monkeypatch):
+    from whattoplay import hltb
+
+    _two_store_library(data_dir)
+
+    def missing(_name):
+        raise hltb.HltbUnavailable(
+            "howlongtobeatpy is not installed (pip install 'whattoplay[hltb]')"
+        )
+
+    monkeypatch.setattr(hltb, "lookup", missing)
+    code, out = run("suggest", "--max-hours", "5")
+    assert code == 1 and "whattoplay[hltb]" in out["message"]

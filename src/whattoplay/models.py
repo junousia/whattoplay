@@ -20,6 +20,10 @@ class Game:
     metacritic_url: str | None = None
     header_image_url: str | None = None
     store_url: str | None = None
+    main_hours: float | None = None  # HowLongToBeat: main story
+    extra_hours: float | None = None  # main + extras
+    completionist_hours: float | None = None
+    hltb_url: str | None = None
 
     @property
     def key(self) -> str:

@@ -19,10 +19,11 @@ Data lives in `$WHATTOPLAY_DIR` (default `~/.local/share/whattoplay`): library c
 
 | Command | Use |
 |---|---|
-| `suggest --limit 20 [--genre X] [--exclude-genre X] [--min-score N] [--platform P] [--threshold-minutes N] [--shuffle [--seed N]]` | Barely-played games (default ≤120 min, unknown playtime included), least played first, balanced across platforms; `--shuffle` randomizes. A game owned on several stores counts once. Skips anything with a status. Not quality-ranked |
+| `suggest --limit 20 [--genre X] [--exclude-genre X] [--min-score N] [--max-hours H] [--min-hours H] [--platform P] [--threshold-minutes N] [--shuffle [--seed N]]` | Barely-played games (default ≤120 min, unknown playtime included), least played first, balanced across platforms; `--shuffle` randomizes. `--max-hours`/`--min-hours` filter by main-story length ("something I can finish tonight" ≈ `--max-hours 6`); at most `--lookup N` (default 25) uncached games are looked up per call, results are cached forever, and games with no known time are dropped unless `--include-unknown-time`. If a short-game request returns few results, run `times --limit 100` and try again. A game owned on several stores counts once. Skips anything with a status. Not quality-ranked |
 | `library [--status S \| --unmarked] [--platform P]` | Whole cached library, for questions the suggest pool is too narrow for |
 | `find <name…>` | Look a game up by name |
 | `mark <platform>:<id> playing\|queued\|finished\|dismissed\|clear [--note T]` | Track status; `--name "Game"` instead of the id works when the name is unambiguous |
+| `times [<name>] [--limit N]` | HowLongToBeat main-story hours. With a name: look up that game. Without: fill the cache for the games `suggest` would pick from (N lookups, about a second each) |
 | `queue` | What the user is playing now or has queued |
 | `stats` | Unique games, counts by status and platform, and when the library was last refreshed (`age_days`) |
 | `refresh [--store S]` | Re-fetch libraries. Slow for Steam (rate-limited metadata) and it hits external services: only when asked, or when `suggest` reports `empty` |
@@ -32,7 +33,7 @@ Data lives in `$WHATTOPLAY_DIR` (default `~/.local/share/whattoplay`): library c
 
 The same game owned on several stores (or PS4/PS5 editions) is one game: a `mark` applies to every copy, `also_on` lists the other copies' keys, and missing genres or scores are filled in from the copy that has them. If `stats` shows `age_days` of a few weeks, offer a `refresh`.
 
-Game records carry `name`, `platform`, `external_id`, `key` (`platform:id`), `playtime_minutes`, `genres`, `metacritic_score`, `store_url` (for Epic a store search link, not the game's own page), `header_image_url`, `status`, `note`, `also_on`. Playtime `null` means the store exposes none (for example Epic), not "never played". Empty `genres` is a data gap, not a fact about the game.
+Game records carry `name`, `platform`, `external_id`, `key` (`platform:id`), `playtime_minutes`, `genres`, `metacritic_score`, `main_hours`/`extra_hours`/`completionist_hours`/`hltb_url` (when looked up), `store_url` (for Epic a store search link, not the game's own page), `header_image_url`, `status`, `note`, `also_on`. Playtime `null` means the store exposes none (for example Epic), not "never played". Empty `genres` is a data gap, not a fact about the game.
 
 ## Picking well
 
@@ -41,7 +42,7 @@ Game records carry `name`, `platform`, `external_id`, `key` (`platform:id`), `pl
 1. Pull a wider pool than you will show (`--limit 20`, or `library` filtered yourself).
 2. Narrow by what was asked: mood, genre, time budget, platform, review quality; then by the user's `preferences.md`.
 3. Prefer variety over the least-played game each time, and do not repeat a game already suggested in the conversation.
-4. Offer 2-4 picks with a one-line reason grounded in the data (genre, score, how long it has sat untouched). Do not invent plot details you have no data on.
+4. Offer 2-4 picks with a one-line reason grounded in the data (genre, score, how long it has sat untouched). Do not invent plot details you have no data on. State times as HowLongToBeat estimates ("about 8 h to beat").
 5. Always include `store_url` when there is one. Never guess store links or appids for games outside the library: look them up.
 6. If nothing fits, say so and offer the closest alternative.
 

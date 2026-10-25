@@ -8,7 +8,7 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-from whattoplay import __version__, deals, recommend, storage
+from whattoplay import __version__, deals, hltb, recommend, storage
 from whattoplay.config import load_config, load_env, resolve_data_dir, save_config, update_env_file
 from whattoplay.models import Game
 from whattoplay.stores import build_stores
@@ -39,6 +39,8 @@ def game_line(game: Game, state: dict) -> str:
     extras = [f"genres: {', '.join(game.genres)}"] if game.genres else []
     if game.metacritic_score is not None:
         extras.append(f"metacritic: {game.metacritic_score}")
+    if game.main_hours is not None:
+        extras.append(f"~{game.main_hours:g} h to beat")
     if status:
         extras.append(status)
     suffix = f" - {'; '.join(extras)}" if extras else ""
@@ -86,6 +88,7 @@ class Context:
 
     def library(self) -> list[Game]:
         games = storage.load_library(self.dir)
+        hltb.apply_times(games, hltb.load_times(self.dir))
         storage.share_metadata(games)  # also fixes libraries cached before this existed
         for g in games:  # caches written before store_url was stored
             if g.store_url is None and g.platform in self.stores:
@@ -239,6 +242,70 @@ def cmd_refresh(ctx: Context, args) -> None:
     emit(args, {"status": "ok", "total": len(merged), "stores": per_store}, text)
 
 
+def hours_filter(ctx: Context, args):
+    """`--max-hours` / `--min-hours` predicate. Looks up at most `--lookup` games that are not
+    cached yet (HowLongToBeat is slow); games with no known time are dropped unless
+    `--include-unknown-time`."""
+    if args.max_hours is None and args.min_hours is None:
+        return None
+    fetcher = hltb.TimeFetcher(
+        ctx.dir,
+        args.lookup,
+        (lambda _m: None) if args.json else lambda m: print(m, file=sys.stderr),
+    )
+
+    def keep(game: Game) -> bool:
+        try:
+            known = fetcher.ensure(game)
+        except hltb.HltbUnavailable as exc:
+            raise CliError(str(exc)) from exc
+        entry = fetcher.times.get(game.group) if known else None
+        hours = (entry or {}).get("main_hours")
+        if hours is None:
+            return args.include_unknown_time
+        game.main_hours = hours
+        game.extra_hours = entry.get("extra_hours")
+        game.completionist_hours = entry.get("completionist_hours")
+        game.hltb_url = entry.get("hltb_url")
+        return (args.max_hours is None or hours <= args.max_hours) and (
+            args.min_hours is None or hours >= args.min_hours
+        )
+
+    return keep
+
+
+def cmd_times(ctx: Context, args) -> None:
+    games = ctx.library()
+    state = effective_state(games, storage.load_state(ctx.dir))
+    if args.query:
+        pool = recommend.find(games, " ".join(args.query))[:1]
+        if not pool:
+            raise CliError(f'no game matches "{" ".join(args.query)}"')
+    else:  # the games suggest would pick from, in its order
+        pool = recommend.suggest(games, args.threshold_minutes, len(games), set(state))
+    fetcher = hltb.TimeFetcher(
+        ctx.dir, args.limit, lambda m: None if args.json else print(m, file=sys.stderr)
+    )
+    try:
+        if args.query and args.refresh:
+            fetcher.times.pop(pool[0].group, None)
+        for g in pool:
+            fetcher.ensure(g)
+    except hltb.HltbUnavailable as exc:
+        raise CliError(str(exc)) from exc
+    hltb.apply_times(pool, fetcher.times)
+    remaining = sum(1 for g in pool if not fetcher.known(g))
+    result = {"status": "ok", "fetched": fetcher.fetched, "remaining": remaining}
+    if args.query:
+        result["game"] = with_status(pool, state, games)[0]
+    emit(
+        args,
+        result,
+        f"fetched {fetcher.fetched}, {remaining} candidates still without a time"
+        + (f"\n{game_line(pool[0], state)}" if args.query else ""),
+    )
+
+
 def cmd_suggest(ctx: Context, args) -> None:
     games = ctx.library()
     if not games:
@@ -258,6 +325,7 @@ def cmd_suggest(ctx: Context, args) -> None:
         exclude_genres=args.exclude_genre,
         min_score=args.min_score,
         shuffle=(random.Random(args.seed) if args.shuffle or args.seed is not None else None),
+        keep=hours_filter(ctx, args),
     )
     if not picks:
         emit(args, {"status": "empty", "message": "No unplayed/low-playtime games match."})
@@ -377,6 +445,7 @@ def cmd_stats(ctx: Context, args) -> None:
         "unique_games": len(groups),
         "by_platform": by_platform,
         "by_status": by_status,
+        "times_known": sum(1 for g in games if g.main_hours is not None),
         "refreshed_at": refreshed,
         "age_days": age,
     }
@@ -467,6 +536,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--min-score", type=int, help="minimum Metacritic score (games without one are dropped)"
     )
+    p.add_argument("--max-hours", type=float, help="main story at most this long (HowLongToBeat)")
+    p.add_argument("--min-hours", type=float, help="main story at least this long (HowLongToBeat)")
+    p.add_argument(
+        "--lookup", type=int, default=25, help="max new HowLongToBeat lookups (default 25)"
+    )
+    p.add_argument(
+        "--include-unknown-time", action="store_true", help="keep games without a known time"
+    )
     p.add_argument("--platform")
     p.add_argument(
         "--shuffle", action="store_true", help="random order instead of least played first"
@@ -485,6 +562,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--name", help="match by name instead")
     p.add_argument("status", choices=[*storage.STATUSES, "clear"])
     p.add_argument("--note")
+    p = add(
+        "times",
+        cmd_times,
+        "Fetch HowLongToBeat times: for one game, or fill the cache for suggest candidates",
+    )
+    p.add_argument(
+        "query", nargs="*", help="game name; omit to fill the cache for the candidate pool"
+    )
+    p.add_argument("--limit", type=int, default=25, help="max lookups (default 25)")
+    p.add_argument("--threshold-minutes", type=int, default=120)
+    p.add_argument("--refresh", action="store_true", help="look the named game up again")
     add("stats", cmd_stats, "Library size, status counts and when the library was last refreshed")
     add("queue", cmd_queue, "Games currently playing or queued")
     p = add("dismiss", cmd_dismiss, "Shorthand for `mark <platform>:<id> dismissed`")

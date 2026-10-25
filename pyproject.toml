@@ -17,6 +17,7 @@ dependencies = ["requests>=2.31"]
 
 [project.optional-dependencies]
 epic = ["legendary-gl>=0.20"]
+hltb = ["howlongtobeatpy>=1.0"]
 
 [project.urls]
 Homepage = "https://github.com/junousia/whattoplay"

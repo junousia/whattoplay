@@ -9,7 +9,7 @@ The tool filters and sorts; choosing a good recommendation is left to you or you
 ```bash
 uvx whattoplay --help                 # no install
 uv tool install whattoplay            # or install it
-uv tool install 'whattoplay[epic]'    # with Epic support (uses legendary)
+uv tool install 'whattoplay[epic,hltb]'    # with Epic support (legendary) and HowLongToBeat times
 ```
 
 Python 3.11 or newer.
@@ -42,6 +42,8 @@ The data directory is `--dir`, else `$WHATTOPLAY_DIR`, else `~/.local/share/what
 ```bash
 whattoplay suggest --limit 20 --genre puzzle     # barely-played games, least played first
 whattoplay suggest --min-score 80 --exclude-genre horror --shuffle
+whattoplay suggest --max-hours 6                 # short games: looks times up on HowLongToBeat as needed
+whattoplay times "Portal 2"                      # time to beat for one game
 whattoplay stats                                  # counts and when the library was last refreshed
 whattoplay find portal
 whattoplay mark steam:620 playing
@@ -54,6 +56,8 @@ whattoplay deals bundles --limit 10               # flags games you don't own ye
 ```
 
 A game owned on several stores counts once everywhere: marks apply to all copies, and genres or scores missing on one store are borrowed from another. Add `--json` to any command. Games are addressed as `<platform>:<id>` or with `--name`.
+
+Time-to-beat data comes from [HowLongToBeat](https://howlongtobeat.com), which has no official API: this uses the unofficial [`howlongtobeatpy`](https://github.com/ScrappyCocco/HowLongToBeat-PythonAPI) scraper (`whattoplay[hltb]`), so it can break when the site changes. Lookups are one at a time, about a second apart, capped per call (`--lookup`) and cached, so each game is requested at most once. Please keep it that way.
 
 Deals use [IsThereAnyDeal](https://isthereanydeal.com/apps/my/) (free API key in `ITAD_API_KEY`).
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+from collections.abc import Callable
 
 from whattoplay.models import Game
 
@@ -31,6 +32,7 @@ def suggest(
     exclude_genres: list[str] | None = None,
     min_score: int | None = None,
     shuffle: random.Random | None = None,
+    keep: Callable[[Game], bool] | None = None,
 ) -> list[Game]:
     """Candidate pool of barely-played games, least played first, balanced across platforms.
 
@@ -54,6 +56,8 @@ def suggest(
             or (min_score is not None and (g.metacritic_score or 0) < min_score)
             or (platform is not None and g.platform != platform)
         ):
+            continue
+        if keep is not None and not keep(g):  # last, so expensive checks only see real candidates
             continue
         seen.add(g.group)
         candidates.append(g)
