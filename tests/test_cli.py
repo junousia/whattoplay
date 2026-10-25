@@ -84,10 +84,102 @@ def test_example_plugin_loads_and_refreshes(run, data_dir):
     import shutil
     from pathlib import Path
 
-    shutil.copy(Path(__file__).parent.parent / "examples" / "example_store.py", data_dir / "plugins" / "jsonfile.py")
+    shutil.copy(
+        Path(__file__).parent.parent / "examples" / "example_store.py",
+        data_dir / "plugins" / "jsonfile.py",
+    )
     (data_dir / "games.json").write_text(json.dumps([{"id": 7, "name": "Example", "minutes": 12}]))
-    (data_dir / ".env").write_text(f"FAKE_TOKEN=ok\nWHATTOPLAY_JSONFILE_PATH={data_dir / 'games.json'}\n")
+    (data_dir / ".env").write_text(
+        f"FAKE_TOKEN=ok\nWHATTOPLAY_JSONFILE_PATH={data_dir / 'games.json'}\n"
+    )
     code, out = run("refresh", "--store", "jsonfile")
     assert code == 0 and out["stores"]["jsonfile"] == {"status": "ok", "count": 1}
     _, found = run("find", "example")
     assert found[0]["key"] == "jsonfile:7"
+
+
+def _two_store_library(data_dir):
+    """Portal on two stores: the second copy has no playtime and no metadata."""
+    import json
+
+    games = [
+        {
+            "name": "Portal",
+            "platform": "fake",
+            "external_id": "1",
+            "playtime_minutes": 700,
+            "genres": ["Puzzle"],
+            "metacritic_score": 90,
+        },
+        {"name": "Portal", "platform": "other", "external_id": "x", "playtime_minutes": None},
+        {
+            "name": "Hades",
+            "platform": "fake",
+            "external_id": "3",
+            "playtime_minutes": 0,
+            "genres": ["Roguelike"],
+            "metacritic_score": 93,
+        },
+        {
+            "name": "Gloomhaven",
+            "platform": "other",
+            "external_id": "y",
+            "playtime_minutes": None,
+            "genres": ["Strategy"],
+        },
+    ]
+    (data_dir / "library.json").write_text(json.dumps(games))
+
+
+def test_same_game_on_two_stores_counts_once_and_uses_largest_playtime(run, data_dir):
+    _two_store_library(data_dir)
+    _, picks = run("suggest")
+    assert sorted(g["name"] for g in picks) == [
+        "Gloomhaven",
+        "Hades",
+    ]  # Portal is played on one store
+
+
+def test_mark_applies_to_every_copy(run, data_dir):
+    _two_store_library(data_dir)
+    code, out = run("mark", "--name", "portal", "finished")
+    assert code == 0 and sorted(out["keys"]) == ["fake:1", "other:x"]
+    _, found = run("find", "portal")
+    assert [(g["status"], g["also_on"]) for g in found] == [
+        ("finished", ["other:x"]),
+        ("finished", ["fake:1"]),
+    ]
+    run("mark", "fake:1", "clear")
+    _, found = run("find", "portal")
+    assert all(g["status"] is None for g in found)
+
+
+def test_suggest_filters_and_shuffle(run, data_dir):
+    _two_store_library(data_dir)
+    _, picks = run("suggest", "--min-score", "92")
+    assert [g["name"] for g in picks] == ["Hades"]
+    _, picks = run("suggest", "--exclude-genre", "roguelike")
+    assert [g["name"] for g in picks] == ["Gloomhaven"]
+    _, a = run("suggest", "--seed", "1")
+    _, b = run("suggest", "--seed", "1")
+    assert a == b
+
+
+def test_stats_counts_games_once(run, data_dir):
+    _two_store_library(data_dir)
+    run("mark", "--name", "portal", "finished")
+    _, out = run("stats")
+    assert out["unique_games"] == 3 and out["entries"] == 4
+    assert out["by_status"] == {"finished": 1, "unmarked": 2}
+    assert out["refreshed_at"] is None
+
+
+def test_refresh_shares_metadata_and_records_time(run, data_dir):
+    from whattoplay import storage
+    from whattoplay.models import Game
+
+    games = [Game("A", "p1", "1", 0, ["RPG"], 80), Game("A", "p2", "2", 0)]
+    storage.share_metadata(games)
+    assert games[1].genres == ["RPG"] and games[1].metacritic_score == 80
+    run("refresh")
+    assert run("stats")[1]["refreshed_at"]

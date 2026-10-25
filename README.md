@@ -41,6 +41,8 @@ The data directory is `--dir`, else `$WHATTOPLAY_DIR`, else `~/.local/share/what
 
 ```bash
 whattoplay suggest --limit 20 --genre puzzle     # barely-played games, least played first
+whattoplay suggest --min-score 80 --exclude-genre horror --shuffle
+whattoplay stats                                  # counts and when the library was last refreshed
 whattoplay find portal
 whattoplay mark steam:620 playing
 whattoplay mark --name "Portal 2" finished --note "great"
@@ -51,7 +53,7 @@ whattoplay deals price --title "Hades" --country FI --shop steam   # needs ITAD_
 whattoplay deals bundles --limit 10               # flags games you don't own yet
 ```
 
-Add `--json` to any command. Games are addressed as `<platform>:<id>` or with `--name`.
+A game owned on several stores counts once everywhere: marks apply to all copies, and genres or scores missing on one store are borrowed from another. Add `--json` to any command. Games are addressed as `<platform>:<id>` or with `--name`.
 
 Deals use [IsThereAnyDeal](https://isthereanydeal.com/apps/my/) (free API key in `ITAD_API_KEY`).
 

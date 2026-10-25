@@ -136,3 +136,40 @@ def test_bundles_flags_owned_games():
         m.get("https://api.isthereanydeal.com/bundles/v1", json=payload)
         [b] = deals.bundles("k", {deals.normalize("Portal: 2")}, "FI", 5)
     assert b["not_owned"] == ["New Game"]
+
+
+def test_epic_metadata_comes_from_exact_steam_name_match():
+    from whattoplay.stores.epic import EpicStore
+
+    games = [g("Hades", "epic", "e1", None), g("Epic Exclusive", "epic", "e2", None)]
+    with requests_mock.Mocker() as m:
+        m.get(
+            "https://store.steampowered.com/api/storesearch/",
+            [
+                {
+                    "json": {
+                        "items": [
+                            {"type": "app", "id": 1145360, "name": "Hades"},
+                            {"type": "app", "id": 9, "name": "Hades II"},
+                        ]
+                    }
+                },
+                {"json": {"items": []}},
+            ],
+        )
+        m.get(
+            "https://store.steampowered.com/api/appdetails",
+            json={
+                "1145360": {
+                    "success": True,
+                    "data": {"genres": [{"description": "Action"}], "metacritic": {"score": 93}},
+                }
+            },
+        )
+        cache: dict = {}
+        from whattoplay.stores import epic
+
+        epic.METADATA_DELAY_SECONDS = 0
+        EpicStore({}, {}).enrich(games, cache, lambda _msg: None)
+    assert games[0].genres == ["Action"] and games[0].metacritic_score == 93
+    assert games[1].genres == [] and cache["e2"] == {}  # miss is cached so it is not re-queried

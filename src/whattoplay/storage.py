@@ -74,6 +74,32 @@ def set_status(data_dir: Path, key: str, status: str | None, note: str | None = 
     _write_json(data_dir / "state.json", {"version": 1, "games": state})
 
 
+def load_meta(data_dir: Path) -> dict:
+    path = data_dir / "meta.json"
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def save_meta(data_dir: Path, meta: dict) -> None:
+    _write_json(data_dir / "meta.json", meta)
+
+
+def share_metadata(games: list[Game]) -> None:
+    """Copies genres, scores and cover art between copies of the same game on different stores,
+    so a store without metadata (Epic, PSN) inherits it from one that has it (Steam)."""
+    groups: dict[str, list[Game]] = {}
+    for g in games:
+        groups.setdefault(g.group, []).append(g)
+    for copies in groups.values():
+        if len(copies) < 2:
+            continue
+        for field in ("genres", "metacritic_score", "metacritic_url", "header_image_url"):
+            donor = next((getattr(c, field) for c in copies if getattr(c, field)), None)
+            if donor:
+                for c in copies:
+                    if not getattr(c, field):
+                        setattr(c, field, donor)
+
+
 def merge_libraries(*lists: list[Game]) -> list[Game]:
     """One entry per (platform, id); on duplicates keep the one with more playtime data."""
     merged: dict[str, Game] = {}

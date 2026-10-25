@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import random
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 from whattoplay import __version__, deals, recommend, storage
@@ -43,12 +45,30 @@ def game_line(game: Game, state: dict) -> str:
     return f"{game.name} [{game.key}] ({playtime} played){suffix}"
 
 
-def with_status(games: list[Game], state: dict) -> list[dict]:
+def effective_state(games: list[Game], state: dict) -> dict:
+    """Status of a game applies to every copy of it (same name, any store)."""
+    by_group: dict[str, dict] = {}
+    for g in games:
+        if g.key in state:
+            by_group.setdefault(g.group, state[g.key])
+    return {
+        g.key: state.get(g.key) or by_group[g.group]
+        for g in games
+        if g.key in state or g.group in by_group
+    }
+
+
+def with_status(games: list[Game], state: dict, library: list[Game]) -> list[dict]:
+    state = effective_state(library, state)
+    copies: dict[str, list[str]] = {}
+    for g in library:
+        copies.setdefault(g.group, []).append(g.key)
     return [
         {
             **g.to_dict(),
             "status": state.get(g.key, {}).get("status"),
             "note": state.get(g.key, {}).get("note"),
+            "also_on": [k for k in copies[g.group] if k != g.key],
         }
         for g in games
     ]
@@ -66,6 +86,7 @@ class Context:
 
     def library(self) -> list[Game]:
         games = storage.load_library(self.dir)
+        storage.share_metadata(games)  # also fixes libraries cached before this existed
         for g in games:  # caches written before store_url was stored
             if g.store_url is None and g.platform in self.stores:
                 g.store_url = self.stores[g.platform].store_url(g)
@@ -84,7 +105,7 @@ def resolve_game(ctx: Context, key: str | None, name: str | None) -> Game:
     matches = recommend.find(games, name)
     if not matches:
         raise CliError(f'no game matches "{name}"')
-    if len(matches) > 1:
+    if len({g.group for g in matches}) > 1:
         raise CliError(
             f'"{name}" is ambiguous, use <platform>:<id>',
             candidates=[{"name": g.name, "key": g.key} for g in matches[:10]],
@@ -205,7 +226,11 @@ def cmd_refresh(ctx: Context, args) -> None:
         if g.platform not in fetched and g.platform in names
     ]
     merged = storage.merge_libraries(kept, *fetched.values())
+    storage.share_metadata(merged)
     storage.save_library(ctx.dir, merged)
+    meta = storage.load_meta(ctx.dir)
+    meta["refreshed_at"] = datetime.now(UTC).isoformat(timespec="seconds")
+    storage.save_meta(ctx.dir, meta)
     text = f"Refreshed library: {len(merged)} games.\n" + "\n".join(
         f"  {n}: {r['status']}"
         + (f" ({r['count']})" if "count" in r else f" - {r.get('reason') or r.get('message')}")
@@ -222,14 +247,22 @@ def cmd_suggest(ctx: Context, args) -> None:
             {"status": "empty", "message": "No cached library. Run `whattoplay refresh` first."},
         )
         return
-    state = storage.load_state(ctx.dir)
+    state = effective_state(games, storage.load_state(ctx.dir))
     picks = recommend.suggest(
-        games, args.threshold_minutes, args.limit, set(state), args.genre, args.platform
+        games,
+        args.threshold_minutes,
+        args.limit,
+        set(state),
+        args.genre,
+        args.platform,
+        exclude_genres=args.exclude_genre,
+        min_score=args.min_score,
+        shuffle=(random.Random(args.seed) if args.shuffle or args.seed is not None else None),
     )
     if not picks:
         emit(args, {"status": "empty", "message": "No unplayed/low-playtime games match."})
         return
-    emit(args, with_status(picks, state), "\n".join(game_line(g, state) for g in picks))
+    emit(args, with_status(picks, state, games), "\n".join(game_line(g, state) for g in picks))
 
 
 def cmd_library(ctx: Context, args) -> None:
@@ -240,40 +273,55 @@ def cmd_library(ctx: Context, args) -> None:
             {"status": "empty", "message": "No cached library. Run `whattoplay refresh` first."},
         )
         return
-    state = storage.load_state(ctx.dir)
+    state = effective_state(games, storage.load_state(ctx.dir))
+    shown = games
     if args.status:
-        games = [g for g in games if state.get(g.key, {}).get("status") == args.status]
+        shown = [g for g in shown if state.get(g.key, {}).get("status") == args.status]
     elif args.unmarked:
-        games = [g for g in games if g.key not in state]
+        shown = [g for g in shown if g.key not in state]
     if args.platform:
-        games = [g for g in games if g.platform == args.platform]
-    games.sort(key=lambda g: g.name.lower())
-    emit(args, with_status(games, state), "\n".join(game_line(g, state) for g in games))
+        shown = [g for g in shown if g.platform == args.platform]
+    shown.sort(key=lambda g: g.name.lower())
+    emit(args, with_status(shown, state, games), "\n".join(game_line(g, state) for g in shown))
 
 
 def cmd_find(ctx: Context, args) -> None:
-    matches = recommend.find(ctx.library(), " ".join(args.query))
-    state = storage.load_state(ctx.dir)
+    games = ctx.library()
+    matches = recommend.find(games, " ".join(args.query))
+    state = effective_state(games, storage.load_state(ctx.dir))
     emit(
         args,
-        with_status(matches, state),
+        with_status(matches, state, games),
         "\n".join(game_line(g, state) for g in matches) or "no match",
     )
+
+
+def mark_all_copies(ctx: Context, game: Game, status: str | None, note: str | None) -> list[str]:
+    """A status applies to every copy of the game (same name on any store)."""
+    keys = [g.key for g in ctx.library() if g.group == game.group] or [game.key]
+    for key in keys:
+        storage.set_status(ctx.dir, key, status, note)
+    return keys
 
 
 def cmd_mark(ctx: Context, args) -> None:
     game = resolve_game(ctx, args.game, args.name)
     status = None if args.status == "clear" else args.status
-    storage.set_status(ctx.dir, game.key, status, args.note)
+    keys = mark_all_copies(ctx, game, status, args.note)
     emit(
         args,
-        {"status": "ok", "game": game.name, "key": game.key, "mark": status},
-        f"{game.name}: {status or 'cleared'}",
+        {"status": "ok", "game": game.name, "key": game.key, "keys": keys, "mark": status},
+        f"{game.name}: {status or 'cleared'} ({', '.join(keys)})",
     )
 
 
 def cmd_dismiss(ctx: Context, args) -> None:
-    storage.set_status(ctx.dir, f"{args.platform}:{args.external_id}", "dismissed")
+    key = f"{args.platform}:{args.external_id}"
+    game = next((g for g in ctx.library() if g.key == key), None)
+    if game:
+        mark_all_copies(ctx, game, "dismissed", None)
+    else:
+        storage.set_status(ctx.dir, key, "dismissed")
     emit(
         args,
         {"status": "ok", "platform": args.platform, "external_id": args.external_id},
@@ -285,9 +333,13 @@ def cmd_queue(ctx: Context, args) -> None:
     state = storage.load_state(ctx.dir)
     by_key = {g.key: g for g in ctx.library()}
     rows = []
+    seen: set[str] = set()
     for key, entry in sorted(state.items(), key=lambda kv: kv[1].get("updated") or ""):
         if entry["status"] in ("playing", "queued"):
             game = by_key.get(key)
+            if game and game.group in seen:
+                continue
+            seen.add(game.group if game else key)
             rows.append(
                 {
                     **(game.to_dict() if game else {"key": key}),
@@ -300,6 +352,38 @@ def cmd_queue(ctx: Context, args) -> None:
         rows,
         "\n".join(f"{r['status']:<8} {r.get('name', r['key'])} [{r['key']}]" for r in rows)
         or "queue is empty",
+    )
+
+
+def cmd_stats(ctx: Context, args) -> None:
+    games = ctx.library()
+    state = effective_state(games, storage.load_state(ctx.dir))
+    groups = {g.group for g in games}
+    by_status: dict[str, int] = {}
+    for group in groups:
+        entry = next((state[g.key] for g in games if g.group == group and g.key in state), None)
+        by_status[entry["status"] if entry else "unmarked"] = (
+            by_status.get(entry["status"] if entry else "unmarked", 0) + 1
+        )
+    by_platform: dict[str, int] = {}
+    for g in games:
+        by_platform[g.platform] = by_platform.get(g.platform, 0) + 1
+    meta = storage.load_meta(ctx.dir)
+    refreshed = meta.get("refreshed_at")
+    age = (datetime.now(UTC) - datetime.fromisoformat(refreshed)).days if refreshed else None
+    result = {
+        "status": "ok",
+        "entries": len(games),
+        "unique_games": len(groups),
+        "by_platform": by_platform,
+        "by_status": by_status,
+        "refreshed_at": refreshed,
+        "age_days": age,
+    }
+    emit(
+        args,
+        result,
+        f"{len(groups)} unique games ({len(games)} entries) {by_platform}\n{by_status}\nrefreshed: {refreshed or 'never'}",
     )
 
 
@@ -376,8 +460,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--threshold-minutes", type=int, default=120)
     p.add_argument("--limit", type=int, default=10)
-    p.add_argument("--genre", action="append")
+    p.add_argument("--genre", action="append", help="only games with this genre (repeatable)")
+    p.add_argument(
+        "--exclude-genre", action="append", help="skip games with this genre (repeatable)"
+    )
+    p.add_argument(
+        "--min-score", type=int, help="minimum Metacritic score (games without one are dropped)"
+    )
     p.add_argument("--platform")
+    p.add_argument(
+        "--shuffle", action="store_true", help="random order instead of least played first"
+    )
+    p.add_argument("--seed", type=int, help="reproducible shuffle")
     p = add("library", cmd_library, "Dump the cached library (no ranking or limit)")
     p.add_argument("--status", choices=storage.STATUSES, help="only games with this status")
     p.add_argument("--unmarked", action="store_true", help="only games without any status")
@@ -391,6 +485,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--name", help="match by name instead")
     p.add_argument("status", choices=[*storage.STATUSES, "clear"])
     p.add_argument("--note")
+    add("stats", cmd_stats, "Library size, status counts and when the library was last refreshed")
     add("queue", cmd_queue, "Games currently playing or queued")
     p = add("dismiss", cmd_dismiss, "Shorthand for `mark <platform>:<id> dismissed`")
     p.add_argument("platform")

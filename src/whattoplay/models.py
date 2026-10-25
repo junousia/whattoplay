@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field, fields
+
+
+def normalize_name(name: str) -> str:
+    """Same game on different stores (and PS4/PS5 editions) share this key."""
+    return re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
 
 
 @dataclass
@@ -18,6 +24,10 @@ class Game:
     @property
     def key(self) -> str:
         return f"{self.platform}:{self.external_id}"
+
+    @property
+    def group(self) -> str:
+        return normalize_name(self.name)
 
     def to_dict(self) -> dict:
         return {**asdict(self), "key": self.key}

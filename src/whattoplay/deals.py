@@ -2,19 +2,15 @@
 
 from __future__ import annotations
 
-import re
-
 import requests
+
+from whattoplay.models import normalize_name as normalize
 
 API_BASE = "https://api.isthereanydeal.com"
 
 
 class DealsError(RuntimeError):
     pass
-
-
-def normalize(title: str) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()
 
 
 def _request(method: str, path: str, **kwargs):
