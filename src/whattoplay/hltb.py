@@ -14,6 +14,7 @@ from whattoplay.models import Game, normalize_name
 
 CACHE_NAME = "hltb"
 LOOKUP_DELAY_SECONDS = 1.0
+MAX_CONSECUTIVE_FAILURES = 3  # then stop: the site is rate-limiting or blocking us
 MIN_SIMILARITY = 0.85  # when no result matches the title exactly
 
 
@@ -92,6 +93,12 @@ class TimeFetcher:
         self.budget = budget
         self.progress = progress
         self.fetched = 0
+        self.failures = 0
+
+    @property
+    def blocked(self) -> bool:
+        """HowLongToBeat keeps failing; further lookups would only hammer it."""
+        return self.failures >= MAX_CONSECUTIVE_FAILURES
 
     def known(self, game: Game) -> bool:
         return game.group in self.times
@@ -100,13 +107,15 @@ class TimeFetcher:
         """True when the game's time is now known (possibly as "no match")."""
         if self.known(game):
             return True
-        if self.budget <= 0:
+        if self.budget <= 0 or self.blocked:
             return False
         self.budget -= 1
         result = lookup(game.name)
         time.sleep(LOOKUP_DELAY_SECONDS)
         if result is None:
+            self.failures += 1
             return False
+        self.failures = 0
         self.times[game.group] = result
         self.fetched += 1
         storage.save_cache(self.data_dir, CACHE_NAME, self.times)

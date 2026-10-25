@@ -222,12 +222,13 @@ def cmd_refresh(ctx: Context, args) -> None:
             per_store[name] = {"status": "error", "message": str(exc)}
     if not fetched:
         raise CliError("no store could be refreshed", stores=per_store)
-    # A store that failed or was skipped keeps its previously cached games.
-    kept = [
-        g
-        for g in storage.load_library(ctx.dir)
-        if g.platform not in fetched and g.platform in names
-    ]
+    # Stores that were not refreshed keep their cached games: failed or skipped ones, and (with
+    # --store) every other store. Only stores that are now disabled are dropped.
+    keep_platforms = {n for n in ctx.stores if n not in fetched and (args.store or ctx.enabled(n))}
+    keep_platforms |= {
+        g.platform for g in storage.load_library(ctx.dir) if g.platform not in ctx.stores
+    }
+    kept = [g for g in storage.load_library(ctx.dir) if g.platform in keep_platforms]
     merged = storage.merge_libraries(kept, *fetched.values())
     storage.share_metadata(merged)
     storage.save_library(ctx.dir, merged)
@@ -271,6 +272,7 @@ def hours_filter(ctx: Context, args):
             args.min_hours is None or hours >= args.min_hours
         )
 
+    ctx.hltb_fetcher = fetcher
     return keep
 
 
@@ -296,12 +298,18 @@ def cmd_times(ctx: Context, args) -> None:
     hltb.apply_times(pool, fetcher.times)
     remaining = sum(1 for g in pool if not fetcher.known(g))
     result = {"status": "ok", "fetched": fetcher.fetched, "remaining": remaining}
+    if fetcher.blocked:
+        result["status"] = "blocked"
+        result["message"] = (
+            "HowLongToBeat is rate-limiting or blocking lookups; wait a few hours and retry"
+        )
     if args.query:
         result["game"] = with_status(pool, state, games)[0]
     emit(
         args,
         result,
-        f"fetched {fetcher.fetched}, {remaining} candidates still without a time"
+        ("HowLongToBeat is rate-limiting us, stopped early. " if fetcher.blocked else "")
+        + f"fetched {fetcher.fetched}, {remaining} candidates still without a time"
         + (f"\n{game_line(pool[0], state)}" if args.query else ""),
     )
 
@@ -327,6 +335,12 @@ def cmd_suggest(ctx: Context, args) -> None:
         shuffle=(random.Random(args.seed) if args.shuffle or args.seed is not None else None),
         keep=hours_filter(ctx, args),
     )
+    fetcher = getattr(ctx, "hltb_fetcher", None)
+    if fetcher is not None and fetcher.blocked:
+        print(
+            "warning: HowLongToBeat is rate-limiting lookups; results may be incomplete",
+            file=sys.stderr,
+        )
     if not picks:
         emit(args, {"status": "empty", "message": "No unplayed/low-playtime games match."})
         return

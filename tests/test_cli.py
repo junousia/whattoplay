@@ -271,3 +271,34 @@ def test_missing_hltb_package_gives_actionable_error(run, data_dir, monkeypatch)
     monkeypatch.setattr(hltb, "lookup", missing)
     code, out = run("suggest", "--max-hours", "5")
     assert code == 1 and "whattoplay[hltb]" in out["message"]
+
+
+def test_lookups_stop_after_repeated_failures(run, data_dir, monkeypatch):
+    from whattoplay import hltb
+
+    _two_store_library(data_dir)
+    calls = []
+    monkeypatch.setattr(
+        hltb, "lookup", lambda name: calls.append(name)
+    )  # always fails: returns None
+    monkeypatch.setattr(hltb, "LOOKUP_DELAY_SECONDS", 0)
+    monkeypatch.setattr(hltb, "MAX_CONSECUTIVE_FAILURES", 2)
+    code, out = run("times", "--limit", "50")
+    assert code == 0 and out["status"] == "blocked" and len(calls) == 2
+    assert not (
+        data_dir / "cache" / "hltb.json"
+    ).exists()  # failures are never cached as "no match"
+
+
+def test_single_store_refresh_keeps_other_stores_games(run, data_dir):
+    import json
+
+    (data_dir / "library.json").write_text(
+        json.dumps(
+            [{"name": "Steam Game", "platform": "steam", "external_id": "1", "playtime_minutes": 0}]
+        )
+    )
+    code, _ = run("refresh", "--store", "fake")
+    assert code == 0
+    _, games = run("library")
+    assert sorted(g["name"] for g in games) == ["Hades", "Portal", "Portal 2", "Steam Game"]
