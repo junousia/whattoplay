@@ -1,0 +1,424 @@
+from __future__ import annotations
+
+import argparse
+import getpass
+import json
+import sys
+from pathlib import Path
+
+from whattoplay import __version__, deals, recommend, storage
+from whattoplay.config import load_config, load_env, resolve_data_dir, save_config, update_env_file
+from whattoplay.models import Game
+from whattoplay.stores import build_stores
+from whattoplay.stores.base import Store, StoreError
+
+HELP_EPILOG = """\
+Games are addressed as <platform>:<id> (e.g. steam:620, shown by suggest/library/find) or with --name.
+Data lives in --dir, $WHATTOPLAY_DIR or ~/.local/share/whattoplay.
+"""
+
+
+class CliError(Exception):
+    def __init__(self, message: str, **extra):
+        super().__init__(message)
+        self.extra = extra
+
+
+def emit(args, payload, text: str | None = None) -> None:
+    if args.json:
+        print(json.dumps(payload))
+    else:
+        print(text if text is not None else json.dumps(payload, indent=2))
+
+
+def game_line(game: Game, state: dict) -> str:
+    playtime = "unknown" if game.playtime_minutes is None else f"{game.playtime_minutes} min"
+    status = state.get(game.key, {}).get("status")
+    extras = [f"genres: {', '.join(game.genres)}"] if game.genres else []
+    if game.metacritic_score is not None:
+        extras.append(f"metacritic: {game.metacritic_score}")
+    if status:
+        extras.append(status)
+    suffix = f" - {'; '.join(extras)}" if extras else ""
+    return f"{game.name} [{game.key}] ({playtime} played){suffix}"
+
+
+def with_status(games: list[Game], state: dict) -> list[dict]:
+    return [
+        {
+            **g.to_dict(),
+            "status": state.get(g.key, {}).get("status"),
+            "note": state.get(g.key, {}).get("note"),
+        }
+        for g in games
+    ]
+
+
+class Context:
+    def __init__(self, args):
+        self.dir: Path = resolve_data_dir(args.dir)
+        self.env = load_env(self.dir)
+        self.config = load_config(self.dir)
+        self.stores, self.plugin_errors = build_stores(self.dir, self.config, self.env)
+
+    def enabled(self, name: str) -> bool:
+        return self.config.get("stores", {}).get(name, {}).get("enabled", True) is not False
+
+    def library(self) -> list[Game]:
+        games = storage.load_library(self.dir)
+        for g in games:  # caches written before store_url was stored
+            if g.store_url is None and g.platform in self.stores:
+                g.store_url = self.stores[g.platform].store_url(g)
+        return games
+
+
+def resolve_game(ctx: Context, key: str | None, name: str | None) -> Game:
+    games = ctx.library()
+    if key:
+        found = next((g for g in games if g.key == key), None)
+        if found is None:
+            raise CliError(f"no game {key} in the library (run `whattoplay refresh`?)")
+        return found
+    if not name:
+        raise CliError("give a <platform>:<id> or --name")
+    matches = recommend.find(games, name)
+    if not matches:
+        raise CliError(f'no game matches "{name}"')
+    if len(matches) > 1:
+        raise CliError(
+            f'"{name}" is ambiguous, use <platform>:<id>',
+            candidates=[{"name": g.name, "key": g.key} for g in matches[:10]],
+        )
+    return matches[0]
+
+
+def cmd_stores(ctx: Context, args) -> None:
+    rows = []
+    for name, store in sorted(ctx.stores.items()):
+        missing = store.missing()
+        rows.append(
+            {
+                "name": name,
+                "label": store.label or name,
+                "enabled": ctx.enabled(name),
+                "ready": not missing,
+                "missing": missing,
+                "settings": [
+                    {"key": s.key, "env": s.env, "secret": s.secret} for s in store.settings
+                ],
+            }
+        )
+    text = "\n".join(
+        f"{r['name']:<10} {'enabled' if r['enabled'] else 'disabled':<9} "
+        + ("ready" if r["ready"] else "needs: " + "; ".join(r["missing"]))
+        for r in rows
+    )
+    if ctx.plugin_errors:
+        text += "\n" + "\n".join(f"warning: {e}" for e in ctx.plugin_errors)
+    emit(args, {"status": "ok", "stores": rows, "plugin_errors": ctx.plugin_errors}, text)
+
+
+def cmd_configure(ctx: Context, args) -> None:
+    store = ctx.stores.get(args.store)
+    if store is None:
+        raise CliError(f"unknown store {args.store!r}; see `whattoplay stores`")
+    if args.disable or args.enable:
+        ctx.config.setdefault("stores", {}).setdefault(args.store, {})["enabled"] = bool(
+            args.enable
+        )
+        save_config(ctx.dir, ctx.config)
+        emit(
+            args,
+            {"status": "ok", "store": args.store, "enabled": bool(args.enable)},
+            f"{args.store}: {'enabled' if args.enable else 'disabled'}",
+        )
+        return
+    if not sys.stdin.isatty():
+        raise CliError(
+            "configure is interactive. Non-interactively, set the environment variables listed by "
+            "`whattoplay stores --json` (or put them in <dir>/.env) and add non-secret values to config.toml."
+        )
+    table = dict(ctx.config.get("stores", {}).get(args.store, {}))
+    secrets: dict[str, str] = {}
+    for setting in store.settings:
+        reply = (getpass.getpass if setting.secret else input)(f"{setting.prompt}: ").strip()
+        if not reply:
+            continue
+        if setting.secret:
+            secrets[setting.env] = reply
+        else:
+            table[setting.key] = reply
+    if args.store == "steam" and table.get("steam_id64"):
+        from whattoplay.stores.steam import resolve_steam_id
+
+        key = secrets.get("STEAM_API_KEY") or ctx.env.get("STEAM_API_KEY", "")
+        table["steam_id64"] = resolve_steam_id(key, table["steam_id64"])
+    table.setdefault("enabled", True)
+    ctx.config.setdefault("stores", {})[args.store] = table
+    save_config(ctx.dir, ctx.config)
+    if secrets:
+        update_env_file(ctx.dir, secrets)
+    print(f"Saved {args.store} settings to {ctx.dir}.")
+
+
+def refresh_store(ctx: Context, store: Store, quiet: bool) -> list[Game]:
+    games = store.fetch_library()
+    cache = storage.load_cache(ctx.dir, store.name)
+    try:
+        store.enrich(
+            games, cache, (lambda _msg: None) if quiet else lambda msg: print(msg, file=sys.stderr)
+        )
+    finally:
+        storage.save_cache(ctx.dir, store.name, cache)  # keep partial progress between runs
+    for g in games:
+        if g.store_url is None:
+            g.store_url = store.store_url(g)
+    return games
+
+
+def cmd_refresh(ctx: Context, args) -> None:
+    if args.store and args.store not in ctx.stores:
+        raise CliError(f"unknown store {args.store!r}; see `whattoplay stores`")
+    names = [args.store] if args.store else [n for n in sorted(ctx.stores) if ctx.enabled(n)]
+    per_store: dict[str, dict] = {}
+    fetched: dict[str, list[Game]] = {}
+    for name in names:
+        store = ctx.stores[name]
+        missing = store.missing()
+        if missing:
+            per_store[name] = {
+                "status": "skipped",
+                "reason": "not configured: " + "; ".join(missing),
+            }
+            continue
+        try:
+            fetched[name] = refresh_store(ctx, store, quiet=args.json)
+            per_store[name] = {"status": "ok", "count": len(fetched[name])}
+        except StoreError as exc:
+            per_store[name] = {"status": "error", "message": str(exc)}
+    if not fetched:
+        raise CliError("no store could be refreshed", stores=per_store)
+    # A store that failed or was skipped keeps its previously cached games.
+    kept = [
+        g
+        for g in storage.load_library(ctx.dir)
+        if g.platform not in fetched and g.platform in names
+    ]
+    merged = storage.merge_libraries(kept, *fetched.values())
+    storage.save_library(ctx.dir, merged)
+    text = f"Refreshed library: {len(merged)} games.\n" + "\n".join(
+        f"  {n}: {r['status']}"
+        + (f" ({r['count']})" if "count" in r else f" - {r.get('reason') or r.get('message')}")
+        for n, r in per_store.items()
+    )
+    emit(args, {"status": "ok", "total": len(merged), "stores": per_store}, text)
+
+
+def cmd_suggest(ctx: Context, args) -> None:
+    games = ctx.library()
+    if not games:
+        emit(
+            args,
+            {"status": "empty", "message": "No cached library. Run `whattoplay refresh` first."},
+        )
+        return
+    state = storage.load_state(ctx.dir)
+    picks = recommend.suggest(
+        games, args.threshold_minutes, args.limit, set(state), args.genre, args.platform
+    )
+    if not picks:
+        emit(args, {"status": "empty", "message": "No unplayed/low-playtime games match."})
+        return
+    emit(args, with_status(picks, state), "\n".join(game_line(g, state) for g in picks))
+
+
+def cmd_library(ctx: Context, args) -> None:
+    games = ctx.library()
+    if not games:
+        emit(
+            args,
+            {"status": "empty", "message": "No cached library. Run `whattoplay refresh` first."},
+        )
+        return
+    state = storage.load_state(ctx.dir)
+    if args.status:
+        games = [g for g in games if state.get(g.key, {}).get("status") == args.status]
+    elif args.unmarked:
+        games = [g for g in games if g.key not in state]
+    if args.platform:
+        games = [g for g in games if g.platform == args.platform]
+    games.sort(key=lambda g: g.name.lower())
+    emit(args, with_status(games, state), "\n".join(game_line(g, state) for g in games))
+
+
+def cmd_find(ctx: Context, args) -> None:
+    matches = recommend.find(ctx.library(), " ".join(args.query))
+    state = storage.load_state(ctx.dir)
+    emit(
+        args,
+        with_status(matches, state),
+        "\n".join(game_line(g, state) for g in matches) or "no match",
+    )
+
+
+def cmd_mark(ctx: Context, args) -> None:
+    game = resolve_game(ctx, args.game, args.name)
+    status = None if args.status == "clear" else args.status
+    storage.set_status(ctx.dir, game.key, status, args.note)
+    emit(
+        args,
+        {"status": "ok", "game": game.name, "key": game.key, "mark": status},
+        f"{game.name}: {status or 'cleared'}",
+    )
+
+
+def cmd_dismiss(ctx: Context, args) -> None:
+    storage.set_status(ctx.dir, f"{args.platform}:{args.external_id}", "dismissed")
+    emit(
+        args,
+        {"status": "ok", "platform": args.platform, "external_id": args.external_id},
+        f"Dismissed {args.platform}:{args.external_id}.",
+    )
+
+
+def cmd_queue(ctx: Context, args) -> None:
+    state = storage.load_state(ctx.dir)
+    by_key = {g.key: g for g in ctx.library()}
+    rows = []
+    for key, entry in sorted(state.items(), key=lambda kv: kv[1].get("updated") or ""):
+        if entry["status"] in ("playing", "queued"):
+            game = by_key.get(key)
+            rows.append(
+                {
+                    **(game.to_dict() if game else {"key": key}),
+                    "status": entry["status"],
+                    "note": entry.get("note"),
+                }
+            )
+    emit(
+        args,
+        rows,
+        "\n".join(f"{r['status']:<8} {r.get('name', r['key'])} [{r['key']}]" for r in rows)
+        or "queue is empty",
+    )
+
+
+def cmd_deals(ctx: Context, args) -> None:
+    api_key = ctx.env.get("ITAD_API_KEY")
+    if not api_key:
+        raise CliError(
+            "ITAD_API_KEY is not set (get one at https://isthereanydeal.com/apps/my/; put it in the environment or <dir>/.env)"
+        )
+    try:
+        if args.what == "bundles":
+            owned = {deals.normalize(g.name) for g in ctx.library()}
+            result = deals.bundles(api_key, owned, args.country, args.limit)
+            text = "\n".join(
+                f"{b['title']} ({b['store']}, expires {b['expiry'] or '?'})\n  not owned: {', '.join(b['not_owned']) or '-'}"
+                for b in result
+            )
+            emit(args, result, text)
+            return
+        if not args.title and not args.appid:
+            raise CliError("deals price needs --title or --appid")
+        found = deals.price(api_key, args.title, args.appid, args.country, args.shop)
+    except deals.DealsError as exc:
+        raise CliError(str(exc)) from exc
+    if found is None:
+        emit(args, {"status": "not_found", "query": args.title or args.appid}, "not found")
+        return
+    low = (found["historyLow"] or {}).get("all")
+    lines = [found["title"]] + (
+        [f"  all-time low: {low['amount']} {low['currency']}"] if low else []
+    )
+    lines += [
+        f"  {d['shop']['name']}: {d['price']['amount']} {d['price']['currency']} (-{d['cut']}%)"
+        for d in found["deals"]
+    ]
+    emit(args, {"status": "ok", **found}, "\n".join(lines))
+
+
+def build_parser() -> argparse.ArgumentParser:
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--json", action="store_true", help="machine-readable output")
+    common.add_argument(
+        "--dir", help="data directory (default $WHATTOPLAY_DIR or ~/.local/share/whattoplay)"
+    )
+
+    parser = argparse.ArgumentParser(
+        prog="whattoplay",
+        description="Pick what to play from the games you already own.",
+        epilog=HELP_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--version", action="version", version=f"whattoplay {__version__}")
+    sub = parser.add_subparsers(dest="command", required=True, metavar="command")
+
+    def add(name, func, help_, **kw):
+        p = sub.add_parser(name, parents=[common], help=help_, description=help_, **kw)
+        p.set_defaults(func=func)
+        return p
+
+    add(
+        "stores",
+        cmd_stores,
+        "List store backends (built-in and plugins) and whether they are ready",
+    )
+    p = add("configure", cmd_configure, "Set up a store interactively, or --enable/--disable it")
+    p.add_argument("store")
+    group = p.add_mutually_exclusive_group()
+    group.add_argument("--enable", action="store_true")
+    group.add_argument("--disable", action="store_true")
+    p = add("refresh", cmd_refresh, "Fetch libraries from all enabled stores into the local cache")
+    p.add_argument("--store", help="refresh only this store")
+    p = add(
+        "suggest", cmd_suggest, "Candidate pool of owned, barely-played games (not quality-ranked)"
+    )
+    p.add_argument("--threshold-minutes", type=int, default=120)
+    p.add_argument("--limit", type=int, default=10)
+    p.add_argument("--genre", action="append")
+    p.add_argument("--platform")
+    p = add("library", cmd_library, "Dump the cached library (no ranking or limit)")
+    p.add_argument("--status", choices=storage.STATUSES, help="only games with this status")
+    p.add_argument("--unmarked", action="store_true", help="only games without any status")
+    p.add_argument("--platform")
+    p = add("find", cmd_find, "Find games by name")
+    p.add_argument("query", nargs="+")
+    p = add(
+        "mark", cmd_mark, "Set a game's status: playing, queued, finished, dismissed (or clear)"
+    )
+    p.add_argument("game", nargs="?", help="<platform>:<id>")
+    p.add_argument("--name", help="match by name instead")
+    p.add_argument("status", choices=[*storage.STATUSES, "clear"])
+    p.add_argument("--note")
+    add("queue", cmd_queue, "Games currently playing or queued")
+    p = add("dismiss", cmd_dismiss, "Shorthand for `mark <platform>:<id> dismissed`")
+    p.add_argument("platform")
+    p.add_argument("external_id")
+    p = add("deals", cmd_deals, "Prices and bundles from IsThereAnyDeal (needs ITAD_API_KEY)")
+    p.add_argument("what", choices=["price", "bundles"])
+    p.add_argument("--title")
+    p.add_argument("--appid", type=int, help="Steam appid")
+    p.add_argument("--country", default="US")
+    p.add_argument("--shop", help="only deals from shops whose name contains this")
+    p.add_argument("--limit", type=int, default=20)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        args.func(Context(args), args)
+    except CliError as exc:
+        if args.json:
+            print(json.dumps({"status": "error", "message": str(exc), **exc.extra}))
+        else:
+            print(f"error: {exc}", file=sys.stderr)
+            for c in exc.extra.get("candidates", []):
+                print(f"  {c['name']} [{c['key']}]", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
